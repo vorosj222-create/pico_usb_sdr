@@ -1,6 +1,11 @@
+
 #pragma once
 
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum {
     BLINK_STREAMING = 25,     // 25 ms   : streaming data
@@ -11,3 +16,7 @@ enum {
 
 void led_set_blink_interval(uint32_t interval_ms);
 void led_update(void);
+
+#ifdef __cplusplus
+}
+#endif

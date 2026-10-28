@@ -24,7 +24,7 @@ project(pico_usb_sdr C CXX ASM)
 pico_sdk_init()
 
 add_executable(${CMAKE_PROJECT_NAME}
-  src/main.c
+  src/main.cpp
   src/usb_descriptors.c
   src/led.c
   src/ringbuffer.c
