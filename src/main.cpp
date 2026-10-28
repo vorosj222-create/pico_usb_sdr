@@ -15,6 +15,11 @@
 #include "tusb.h"
 #include "usb_descriptors.h"
 
+#include "hardware/pio.h"
+#include "dma_reader.h"
+#include "i2s_master_clock.h"
+#include "i2s_master_input.h"
+
 static ringbuffer_t rx_buffer = {0};
 
 static int32_t scratch_in[64 * 2];
@@ -22,6 +27,14 @@ static int32_t scratch_in[64 * 2];
 static int32_t test_samples[48 * 2];
 static uint32_t sample_phase = 0;
 static uint32_t last_audio_ms = 0;
+
+static constexpr size_t I2S_BUFFER_WORDS = 48 * 2;
+
+alignas(32) static uint32_t i2s_buffer_a[I2S_BUFFER_WORDS];
+alignas(32) static uint32_t i2s_buffer_b[I2S_BUFFER_WORDS];
+static int32_t usb_samples[I2S_BUFFER_WORDS];
+
+static uint32_t usb_write_failures = 0;
 
 void led_task(void)
 {
@@ -73,7 +86,7 @@ bool tud_audio_rx_done_pre_read_cb(
 }
 
 /* Generate 500 Hz triangle (left) and square (right), 48 kHz stereo. */
-void audio_task(void)
+void audio_task(DMAReader &reader)
 {
     uint32_t sampling_rate;
     uint8_t bit_rate;
@@ -84,43 +97,25 @@ void audio_task(void)
     if (sampling_rate != 48000 || channels != 2)
         return;
 
-    uint32_t now = board_millis();
+    volatile uint32_t *samples = reader.getCompletedBuffer();
 
-    if (now == last_audio_ms)
+    if (samples == nullptr)
         return;
 
-    last_audio_ms = now;
+    for (size_t i = 0; i < I2S_BUFFER_WORDS; i++)
+        usb_samples[i] = (int32_t)((uint32_t)samples[i] << 1);
 
-    for (size_t i = 0; i < 48; i++) {
-        uint32_t phase = sample_phase;
+    uint16_t written = tud_audio_write(usb_samples, sizeof(usb_samples));
 
-        int32_t triangle;
+    if (written != sizeof(usb_samples))
+    usb_write_failures++;
 
-        if (phase < 48) {
-            triangle = (int32_t)(
-                -0x40000000LL +
-                (int64_t)phase * (0x80000000LL / 48));
-        } else {
-            triangle = (int32_t)(
-                0x40000000LL -
-                (int64_t)(phase - 48) * (0x80000000LL / 48));
-        }
-
-        int32_t square =
-            (phase < 48) ? 0x40000000 : -0x40000000;
-
-        test_samples[2 * i]     = triangle;
-        test_samples[2 * i + 1] = square;
-
-        sample_phase = (sample_phase + 1) % 96;
-    }
-
-    tud_audio_write(test_samples, sizeof(test_samples));
+    (void)written;
 }
 
 int main(void)
 {
-    set_sys_clock_khz(240000, true);
+    set_sys_clock_khz(192000, true);
 
     board_init();
 
@@ -132,9 +127,39 @@ int main(void)
     tusb_init(BOARD_TUD_RHPORT, &dev_init);
     board_init_after_tusb();
 
+    PIO pio = pio0;
+
+I2SMasterClock clock(
+    pio,
+    pio_claim_unused_sm(pio, true),
+    16,
+    48000,
+    256
+);
+
+I2SMasterInput input(
+    pio,
+    pio_claim_unused_sm(pio, true),
+    20,
+    17,
+    48000,
+    32
+);
+
+DMAReader reader(
+    pio,
+    input.sm,
+    i2s_buffer_a,
+    i2s_buffer_b,
+    I2S_BUFFER_WORDS
+);
+
+clock.enable();
+input.enable();
+
     while (1) {
         tud_task();
-        audio_task();
+        audio_task(reader);
         led_task();
 
         static uint32_t last_print = 0;
@@ -144,9 +169,13 @@ int main(void)
             last_print = now;
 
             if (tud_cdc_connected()) {
-                tud_cdc_write_str("RP2350 raw USB audio loopback\r\n");
-                tud_cdc_write_flush();
-            }
+    tud_cdc_write_str("USB audio write failures: ");
+    char msg[16];
+snprintf(msg, sizeof(msg), "%lu\r\n",
+         (unsigned long)usb_write_failures);
+tud_cdc_write_str(msg);
+    tud_cdc_write_flush();
+}
         }
     }
 }
