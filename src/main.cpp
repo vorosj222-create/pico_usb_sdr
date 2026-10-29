@@ -1,4 +1,3 @@
-
 /*
  * Copyright 2025, Hiroyuki OYAMA
  *
@@ -6,16 +5,18 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include "bsp/board_api.h"
 #include "hardware/clocks.h"
+#include "hardware/pio.h"
 #include "led.h"
 #include "pico/stdlib.h"
 #include "ringbuffer.h"
 #include "tusb.h"
+#include "common/tusb_fifo.h"
 #include "usb_descriptors.h"
 
-#include "hardware/pio.h"
 #include "dma_reader.h"
 #include "i2s_master_clock.h"
 #include "i2s_master_input.h"
@@ -32,14 +33,17 @@ static constexpr size_t I2S_BUFFER_WORDS = 48 * 2;
 
 alignas(32) static uint32_t i2s_buffer_a[I2S_BUFFER_WORDS];
 alignas(32) static uint32_t i2s_buffer_b[I2S_BUFFER_WORDS];
+
 static int32_t usb_samples[I2S_BUFFER_WORDS];
 
 static uint32_t usb_write_failures = 0;
+
 
 void led_task(void)
 {
     led_update();
 }
+
 
 /* USB audio output: TinyUSB handles packet transmission. */
 bool tud_audio_tx_done_pre_load_cb(
@@ -55,6 +59,7 @@ bool tud_audio_tx_done_pre_load_cb(
 
     return true;
 }
+
 
 /* USB audio input: receive samples into the RX buffer. */
 bool tud_audio_rx_done_pre_read_cb(
@@ -85,7 +90,8 @@ bool tud_audio_rx_done_pre_read_cb(
     return true;
 }
 
-/* Generate 500 Hz triangle (left) and square (right), 48 kHz stereo. */
+
+/* Forward I2S samples to USB audio. */
 void audio_task(DMAReader &reader)
 {
     uint32_t sampling_rate;
@@ -103,15 +109,24 @@ void audio_task(DMAReader &reader)
         return;
 
     for (size_t i = 0; i < I2S_BUFFER_WORDS; i++)
+    {
         usb_samples[i] = (int32_t)((uint32_t)samples[i] << 1);
+    }
 
-    uint16_t written = tud_audio_write(usb_samples, sizeof(usb_samples));
+    //static uint32_t cycle_count = 0;
+
+    //if (++cycle_count % 1000 == 0)
+    //return;
+    uint16_t written = tud_audio_write(
+        usb_samples,
+        sizeof(usb_samples));
 
     if (written != sizeof(usb_samples))
-    usb_write_failures++;
-
-    (void)written;
+    {
+        usb_write_failures++;
+    }
 }
+
 
 int main(void)
 {
@@ -129,53 +144,68 @@ int main(void)
 
     PIO pio = pio0;
 
-I2SMasterClock clock(
-    pio,
-    pio_claim_unused_sm(pio, true),
-    16,
-    48000,
-    256
-);
+    I2SMasterClock clock(
+        pio,
+        pio_claim_unused_sm(pio, true),
+        16,
+        48000,
+        256);
 
-I2SMasterInput input(
-    pio,
-    pio_claim_unused_sm(pio, true),
-    20,
-    17,
-    48000,
-    32
-);
+    I2SMasterInput input(
+        pio,
+        pio_claim_unused_sm(pio, true),
+        20,
+        17,
+        48000,
+        32);
 
-DMAReader reader(
-    pio,
-    input.sm,
-    i2s_buffer_a,
-    i2s_buffer_b,
-    I2S_BUFFER_WORDS
-);
+    DMAReader reader(
+        pio,
+        input.sm,
+        i2s_buffer_a,
+        i2s_buffer_b,
+        I2S_BUFFER_WORDS);
 
-clock.enable();
-input.enable();
+    clock.enable();
+    input.enable();
 
-    while (1) {
+    uint32_t last_print = 0;
+
+    while (1)
+    {
         tud_task();
         audio_task(reader);
         led_task();
 
-        static uint32_t last_print = 0;
         uint32_t now = board_millis();
 
-        if (now - last_print > 1000) {
+        if (now - last_print >= 1000)
+        {
             last_print = now;
 
-            if (tud_cdc_connected()) {
-    tud_cdc_write_str("USB audio write failures: ");
-    char msg[16];
-snprintf(msg, sizeof(msg), "%lu\r\n",
-         (unsigned long)usb_write_failures);
-tud_cdc_write_str(msg);
-    tud_cdc_write_flush();
-}
+            if (tud_cdc_connected())
+            {
+                tu_fifo_t *fifo = tud_audio_get_ep_in_ff();
+
+                int remaining = -1;
+
+                if (fifo != nullptr)
+                {
+                    remaining = (int)tu_fifo_remaining(fifo);
+                }
+
+                char msg[96];
+
+                snprintf(
+                    msg,
+                    sizeof(msg),
+                    "FIFO free: %d bytes, write failures: %lu\r\n",
+                    remaining,
+                    (unsigned long)usb_write_failures);
+
+                tud_cdc_write_str(msg);
+                tud_cdc_write_flush();
+            }
         }
     }
 }

@@ -1,0 +1,3 @@
+mondjuk ez a saját buffer egy 2 dimenziós tömb, a sorai mind 49 mintapárt tudnak tárolni. a dma tölti őket, nem pingpong hanem sorban. eddig érthető?
+
+ok. a mi pointerünk sorra mutat, és azt szeretnénk, hogy nagyjából a sorok fele távolságra legyen ez a pointer a dma sor pointertől. A játék a következő: a dma jelenti, hogy kész egy új sor, és mi ráirányítjuk a következő sorra. ezzel a dma le van tudva, ilyen egyszerű. aztán megnézzük, van-e hely 49 (!) mintapárnak a tinyusb fifo-ban, ha van, akkor elküldjük neki az ő következő sorát, és aszerint 47, 48 vagy 49 mintapárt, hogy éppen kell-e kihagyni vagy szaporítani. persze most az első tesztben ez mindig 48
